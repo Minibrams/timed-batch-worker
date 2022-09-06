@@ -10,6 +10,7 @@ import logging
 # 1) the "batch is full" event fires, or 
 # 2) the "5 seconds have passed" event fires
 # ... without having to spend CPU on constant polling for either.
+#
 # Credit @ SO/Claudiu
 
 def or_set(self):
