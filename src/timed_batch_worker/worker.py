@@ -13,6 +13,9 @@ import logging
 #
 # Credit @ SO/Claudiu
 
+class InterruptableEvent(Event):
+    is_interrupted = False
+
 def or_set(self):
     self._set()
     self.changed()
@@ -31,12 +34,21 @@ def anyfy(e, changed_callback):
     e.clear = lambda: or_clear(e)
 
 
-def any_event(*events):
-    or_event = Event()
+def any_event(*events: InterruptableEvent):
+    or_event = InterruptableEvent()
 
     def changed():
-        bools = [e.is_set() for e in events]
-        if any(bools):
+        found_set_event = False
+        for e in events:
+            if e.is_set():
+                found_set_event = True
+
+                if e.is_interrupted:
+                    or_event.is_interrupted = True
+
+                break
+
+        if found_set_event:
             or_event.set()
         else:
             or_event.clear()
@@ -72,29 +84,42 @@ class TimedBatchWorker():
         self._flush_interval = flush_interval
         self._flush_batch_size = flush_batch_size
         self._item_enqueued_event = None
+        self._flush_timeout_event = None
+        self._flush_full_batch_event = None
 
         self._timed_worker_thread = None
         self._batch_worker_thread = None
         self._flush_worker_thread = None
 
-    def _timed_worker(self, flush_event: Event):
+    def _timed_worker(self, flush_event: InterruptableEvent, parent_worker: 'TimedBatchWorker'):
         while True:
             sleep(self._flush_interval)
+
+            if not parent_worker.is_running:
+                return
+
             flush_event.set()
 
-    def _batch_worker(self, log_created_event: Event, flush_event: Event):
+    def _batch_worker(self, log_created_event: InterruptableEvent, flush_event: InterruptableEvent):
         while True:
             log_created_event.wait()
+
+            if log_created_event.is_interrupted:
+                return
+
             if self._queue.unfinished_tasks > self._flush_batch_size:
                 flush_event.set()
 
             log_created_event.clear()
 
-    def _flush_worker(self, do_flush_event: Event):
+    def _flush_worker(self, do_flush_event: InterruptableEvent):
         batch = []
 
         while True:
             do_flush_event.wait()
+
+            if do_flush_event.is_interrupted:
+                return
 
             while not self._queue.empty():
                 batch.append(self._queue.get())
@@ -111,22 +136,32 @@ class TimedBatchWorker():
             do_flush_event.clear()
 
     def start(self):
-        self._item_enqueued_event = Event()
-
-        flush_timeout_event = Event()
-        flush_full_batch_event = Event()
+        self._item_enqueued_event = InterruptableEvent()
+        self._flush_timeout_event = InterruptableEvent()
+        self._flush_full_batch_event = InterruptableEvent()
 
         do_flush_event = any_event(
-            flush_timeout_event,
-            flush_full_batch_event
+            self._flush_timeout_event,
+            self._flush_full_batch_event
         )
 
-        self._batch_worker_thread = Thread(target=self._batch_worker, args=(
-            self._item_enqueued_event, flush_full_batch_event,), daemon=True)
-        self._timed_worker_thread = Thread(target=self._timed_worker, args=(
-            flush_timeout_event,), daemon=True)
-        self._flush_worker_thread = Thread(target=self._flush_worker, args=(
-            do_flush_event,), daemon=True)
+        self._batch_worker_thread = Thread(
+            target=self._batch_worker, 
+            args=(self._item_enqueued_event, self._flush_full_batch_event,), 
+            daemon=True
+        )
+
+        self._timed_worker_thread = Thread(
+            target=self._timed_worker, 
+            args=(self._flush_timeout_event, self),
+            daemon=True
+        )
+
+        self._flush_worker_thread = Thread(
+            target=self._flush_worker, 
+            args=(do_flush_event,),
+            daemon=True
+        )
 
         self._timed_worker_thread.start()
         self._batch_worker_thread.start()
@@ -135,5 +170,27 @@ class TimedBatchWorker():
         self.is_running = True
 
     def enqueue(self, item):
+        if not self.is_running:
+            return
+
         self._queue.put(item)
         self._item_enqueued_event.set()
+
+    def stop(self):
+        """
+        Stops flush and bash worker threads immediately.
+        The timed worker thread will stop after the next flush interval.
+        """
+        self.is_running = False
+        self._item_enqueued_event.is_interrupted = True
+        self._flush_timeout_event.is_interrupted = True
+        self._flush_full_batch_event.is_interrupted = True
+
+        # Set all events to force the worker threads to exit
+        self._item_enqueued_event.set()
+        self._flush_timeout_event.set()
+        self._flush_full_batch_event.set()
+
+        self._timed_worker_thread.join()
+        self._batch_worker_thread.join()
+        self._flush_worker_thread.join()
