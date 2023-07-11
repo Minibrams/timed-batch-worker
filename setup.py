@@ -5,7 +5,7 @@ with open('README.md') as fp:
 
 setuptools.setup(
     name="timed-batch-worker",
-    version="0.0.3",
+    version="0.0.4",
     author="Anders Brams",
     author_email="anders@brams.dk",
     description="Python library for efficiently batch-processing workloads asynchronously with batch-size- and time-based flushes.",
