@@ -194,3 +194,8 @@ class TimedBatchWorker():
         self._timed_worker_thread.join()
         self._batch_worker_thread.join()
         self._flush_worker_thread.join()
+
+        while not self._queue.empty():
+            self._queue.get()
+            self._queue.task_done()
+
